@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="10" fill="#0a0c0f"/>
+  <text
+    x="7" y="47"
+    font-family="'Arial Black','Helvetica Neue',Arial,sans-serif"
+    font-weight="900"
+    font-size="33"
+    fill="#ffffff"
+    letter-spacing="-1"
+  >SK</text>
+  <circle cx="57.5" cy="47" r="4.5" fill="#c8ff00"/>
+</svg>
