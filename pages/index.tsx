@@ -1,571 +1,538 @@
 import { useState, useRef, useEffect } from 'react'
 import Head from 'next/head'
+import type { ProfileResult } from './api/scan'
 
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-interface SocialProfile {
-  found: boolean; confidence: number; url?: string; handle?: string
-  data?: {
-    name?: string; bio?: string; company?: string; location?: string
-    publicRepos?: number; followers?: number; following?: number
-    createdAt?: string; avatarUrl?: string; blog?: string
-  }
-}
-interface Breach { name: string; year: number; severity: 'low'|'medium'|'high'; dataTypes: string[] }
-interface ProfileResult {
-  email: string; username: string; domain: string
-  gravatarUrl: string | null; gravatarProfile: Record<string,unknown> | null
-  github: SocialProfile; breaches: Breach[]; companyLogo: string | null
-  domainInfo: { company: string; mxProvider: string; emailType: string; reputation: string }
-  aiSummary: string; riskScore: number; trustScore: number
-  identityConfidence: number; botProbability: number; threatFlags: string[]
-  timeline: { year: number; event: string }[]; scannedAt: string
-}
-
-// ─── Scan stages ──────────────────────────────────────────────────────────────
-const STAGES = [
-  { id: 'email',   label: 'Email validation' },
-  { id: 'domain',  label: 'Domain intelligence' },
-  { id: 'gravatar',label: 'Gravatar lookup' },
-  { id: 'github',  label: 'GitHub discovery' },
-  { id: 'breach',  label: 'Breach analysis' },
-  { id: 'company', label: 'Company signals' },
-  { id: 'ai',      label: 'AI profiling' },
+// ─── Scan step labels ─────────────────────────────────────────────────────────
+const STEPS = [
+  { id: 'domain',   label: 'Domain intelligence' },
+  { id: 'gravatar', label: 'Gravatar lookup' },
+  { id: 'github',   label: 'GitHub discovery' },
+  { id: 'breach',   label: 'Breach analysis' },
+  { id: 'npm',      label: 'npm packages' },
+  { id: 'logo',     label: 'Company signals' },
+  { id: 'ai',       label: 'AI profiling' },
 ]
 
-// ─── Small components ─────────────────────────────────────────────────────────
-function Badge({ type, text }: { type: 'low'|'medium'|'high'|'ok'; text: string }) {
+const QUICK_TARGETS = [
+  'torvalds@linux-foundation.org',
+  'john.doe@google.com',
+  'researcher@mit.edu',
+]
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function ScoreRing({ value, label, color }: { value: number; label: string; color: string }) {
+  const r = 30, circ = 2 * Math.PI * r
+  const fill = circ - (value / 100) * circ
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <svg width="80" height="80" viewBox="0 0 80 80">
+        <circle cx="40" cy="40" r={r} fill="none" stroke="#1a1a2e" strokeWidth="6" />
+        <circle
+          cx="40" cy="40" r={r} fill="none"
+          stroke={color} strokeWidth="6"
+          strokeDasharray={circ} strokeDashoffset={fill}
+          strokeLinecap="round"
+          transform="rotate(-90 40 40)"
+          style={{ transition: 'stroke-dashoffset 1s ease' }}
+        />
+        <text x="40" y="44" textAnchor="middle" fill={color} fontSize="15" fontWeight="700" fontFamily="monospace">
+          {value}
+        </text>
+      </svg>
+      <span className="text-xs text-gray-400 tracking-widest uppercase">{label}</span>
+    </div>
+  )
+}
+
+function Badge({ text, variant }: { text: string; variant: 'danger' | 'warning' | 'info' | 'success' }) {
   const styles: Record<string, string> = {
-    low:    'bg-green-500/10 border-green-500/30 text-green-400',
-    ok:     'bg-green-500/10 border-green-500/30 text-green-400',
-    medium: 'bg-yellow-500/10 border-yellow-500/30 text-yellow-400',
-    high:   'bg-red-500/10 border-red-500/30 text-red-400',
+    danger:  'bg-red-900/40 text-red-400 border-red-700/40',
+    warning: 'bg-yellow-900/40 text-yellow-400 border-yellow-700/40',
+    info:    'bg-blue-900/40 text-blue-400 border-blue-700/40',
+    success: 'bg-green-900/40 text-green-400 border-green-700/40',
   }
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs border font-mono tracking-wider ${styles[type]}`}>
+    <span className={`text-[10px] px-2 py-0.5 rounded border font-mono tracking-wider ${styles[variant]}`}>
       {text}
     </span>
   )
 }
 
-function ScoreRing({ value, label, color }: { value: number; label: string; color: string }) {
-  const r = 28; const circ = 2 * Math.PI * r
-  const offset = circ * (1 - value / 100)
+function Section({ title, icon, children }: { title: string; icon: string; children: React.ReactNode }) {
   return (
-    <div className="flex flex-col items-center gap-1">
-      <div className="relative w-16 h-16">
-        <svg className="w-16 h-16 -rotate-90" viewBox="0 0 64 64">
-          <circle cx="32" cy="32" r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="5"/>
-          <circle cx="32" cy="32" r={r} fill="none" stroke={color} strokeWidth="5"
-            strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
-            style={{ transition: 'stroke-dashoffset 1.2s ease' }}/>
-        </svg>
-        <div className="absolute inset-0 flex items-center justify-center">
-          <span className="text-sm font-bold font-mono" style={{ color }}>{value}</span>
-        </div>
+    <div className="border border-green-900/30 rounded-lg overflow-hidden">
+      <div className="flex items-center gap-2 px-4 py-2 bg-green-950/20 border-b border-green-900/20">
+        <span className="text-green-500">{icon}</span>
+        <span className="text-xs text-green-400 font-mono tracking-widest uppercase">{title}</span>
       </div>
-      <span className="text-xs text-white/30 tracking-widest uppercase">{label}</span>
+      <div className="p-4">{children}</div>
     </div>
   )
 }
 
-function TypewriterText({ text }: { text: string }) {
-  const [displayed, setDisplayed] = useState('')
-  useEffect(() => {
-    setDisplayed('')
-    let i = 0
-    const tick = () => {
-      if (i < text.length) { setDisplayed(text.slice(0, ++i)); setTimeout(tick, 16) }
-    }
-    const t = setTimeout(tick, 400)
-    return () => clearTimeout(t)
-  }, [text])
+function DataRow({ label, value, mono = false }: { label: string; value: React.ReactNode; mono?: boolean }) {
   return (
-    <span>
-      {displayed}
-      {displayed.length < text.length && (
-        <span className="inline-block w-0.5 h-3.5 bg-blue-400 animate-blink ml-0.5 align-middle" />
-      )}
-    </span>
-  )
-}
-
-// ─── Tab views ────────────────────────────────────────────────────────────────
-function OverviewTab({ d }: { d: ProfileResult }) {
-  const riskColor = d.riskScore < 30 ? '#00ff9d' : d.riskScore < 60 ? '#ffd60a' : '#ff4d6d'
-  return (
-    <div className="space-y-4 animate-fade-up">
-      {/* Identity hero */}
-      <div className="card p-4">
-        <div className="flex items-start gap-4">
-          {(d.gravatarUrl || d.github?.data?.avatarUrl) ? (
-            <img
-              src={d.github?.data?.avatarUrl || d.gravatarUrl || ''}
-              alt="avatar" className="w-16 h-16 rounded-lg border border-white/10 object-cover"
-            />
-          ) : (
-            <div className="w-16 h-16 rounded-lg border border-[var(--c1)]/20 bg-[var(--c1)]/5 flex items-center justify-center text-xl text-[var(--c1)] font-bold">
-              {d.username[0].toUpperCase()}
-            </div>
-          )}
-          <div className="flex-1 min-w-0">
-            <div className="text-[var(--c1)] font-bold text-base tracking-wide">
-              {d.github?.data?.name || (d.gravatarProfile as Record<string,unknown>)?.displayName as string || d.username}
-            </div>
-            <div className="text-white/40 text-xs mt-0.5">{d.email}</div>
-            {d.github?.data?.bio && (
-              <div className="text-white/60 text-xs mt-1 italic">&ldquo;{d.github.data.bio}&rdquo;</div>
-            )}
-            <div className="flex flex-wrap gap-1.5 mt-2">
-              <Badge type={d.domainInfo.reputation === 'trusted' ? 'ok' : d.domainInfo.reputation === 'suspicious' ? 'high' : 'medium'}
-                text={d.domainInfo.emailType.toUpperCase()} />
-              {d.threatFlags.map(f => <Badge key={f} type="high" text={f} />)}
-              {d.threatFlags.length === 0 && <Badge type="ok" text="NO THREATS" />}
-            </div>
-          </div>
-          {d.companyLogo && (
-            <img src={d.companyLogo} alt="company" className="w-10 h-10 rounded object-contain opacity-70" />
-          )}
-        </div>
-      </div>
-
-      {/* Scores */}
-      <div className="card p-4">
-        <div className="text-xs text-[var(--c1)]/50 tracking-widest uppercase mb-4">Signal Scores</div>
-        <div className="flex justify-around">
-          <ScoreRing value={d.identityConfidence} label="Identity" color="var(--c1)" />
-          <ScoreRing value={d.trustScore} label="Trust" color="var(--c2)" />
-          <ScoreRing value={d.riskScore} label="Risk" color={riskColor} />
-          <ScoreRing value={100 - d.botProbability} label="Human" color="#bd00ff" />
-        </div>
-      </div>
-
-      {/* AI Summary */}
-      <div className="card p-4">
-        <div className="flex items-center gap-2 mb-3">
-          <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse-green" />
-          <span className="text-xs text-blue-400 tracking-widest uppercase">AI Intelligence Summary</span>
-        </div>
-        <div className="bg-blue-500/5 border border-blue-500/15 rounded-lg p-3">
-          <p className="text-sm text-white/70 leading-relaxed font-sans">
-            <TypewriterText text={d.aiSummary} />
-          </p>
-        </div>
-      </div>
-
-      {/* Quick stats */}
-      <div className="grid grid-cols-2 gap-3">
-        <div className="card p-3">
-          <div className="text-xs text-white/30 tracking-widest uppercase mb-1">Company</div>
-          <div className="text-sm text-white/80">{d.domainInfo.company}</div>
-        </div>
-        <div className="card p-3">
-          <div className="text-xs text-white/30 tracking-widest uppercase mb-1">MX Provider</div>
-          <div className="text-sm text-white/80">{d.domainInfo.mxProvider}</div>
-        </div>
-        <div className="card p-3">
-          <div className="text-xs text-white/30 tracking-widest uppercase mb-1">Breaches</div>
-          <div className={`text-sm font-bold ${d.breaches.length > 0 ? 'text-red-400' : 'text-green-400'}`}>
-            {d.breaches.length > 0 ? `${d.breaches.length} Found` : 'Clean'}
-          </div>
-        </div>
-        <div className="card p-3">
-          <div className="text-xs text-white/30 tracking-widest uppercase mb-1">GitHub</div>
-          <div className={`text-sm font-bold ${d.github.found ? 'text-[var(--c1)]' : 'text-white/30'}`}>
-            {d.github.found ? `@${d.github.handle}` : 'Not found'}
-          </div>
-        </div>
-      </div>
+    <div className="flex justify-between items-start py-1.5 border-b border-gray-800/50 last:border-0">
+      <span className="text-xs text-gray-500 shrink-0 w-36">{label}</span>
+      <span className={`text-xs text-right ${mono ? 'font-mono text-green-400' : 'text-gray-300'} break-all ml-2`}>
+        {value || <span className="text-gray-600">—</span>}
+      </span>
     </div>
   )
 }
 
-function SocialTab({ d }: { d: ProfileResult }) {
-  const platforms = [
-    { label: 'GitHub', key: 'github', icon: '⌥', profile: d.github },
-    { label: 'Gravatar', key: 'gravatar', icon: '◈', profile: { found: !!d.gravatarUrl, confidence: d.gravatarUrl ? 95 : 0, url: d.gravatarUrl || undefined } },
-  ]
-  return (
-    <div className="space-y-4 animate-fade-up">
-      <div className="card p-4">
-        <div className="text-xs text-[var(--c1)]/50 tracking-widest uppercase mb-4">Platform Discovery</div>
-        <div className="space-y-3">
-          {platforms.map(p => (
-            <div key={p.key} className={`flex items-center gap-3 p-3 rounded-lg border ${p.profile.found ? 'bg-green-500/5 border-green-500/20' : 'bg-white/2 border-white/5'}`}>
-              <span className={`text-lg ${p.profile.found ? 'text-[var(--c1)]' : 'text-white/20'}`}>{p.icon}</span>
-              <div className="flex-1">
-                <div className={`text-sm font-semibold ${p.profile.found ? 'text-white/90' : 'text-white/25'}`}>{p.label}</div>
-                <div className="text-xs text-white/40 mt-0.5">
-                  {p.profile.found ? (p.profile.handle ? `@${p.profile.handle}` : p.profile.url || 'Profile found') : 'Not detected'}
-                </div>
-              </div>
-              {p.profile.found && (
-                <div className="text-right">
-                  <div className="text-xs text-[var(--c1)] font-bold">{p.profile.confidence}%</div>
-                  <div className="text-xs text-white/30">confidence</div>
-                </div>
-              )}
-            </div>
-          ))}
-
-          {/* Static undetected platforms */}
-          {['LinkedIn', 'Twitter/X', 'Reddit', 'StackOverflow', 'Medium', 'Dev.to'].map(name => (
-            <div key={name} className="flex items-center gap-3 p-3 rounded-lg border bg-white/[0.02] border-white/5">
-              <span className="text-lg text-white/15">◌</span>
-              <div className="flex-1">
-                <div className="text-sm text-white/25">{name}</div>
-                <div className="text-xs text-white/20">Add API key to enable</div>
-              </div>
-              <span className="text-xs text-white/20 border border-white/10 rounded px-1.5 py-0.5">—</span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* GitHub detail */}
-      {d.github.found && d.github.data && (
-        <div className="card p-4">
-          <div className="text-xs text-[var(--c1)]/50 tracking-widest uppercase mb-3">GitHub Profile Detail</div>
-          <div className="grid grid-cols-3 gap-2 mb-3">
-            {[
-              { label: 'Repos', val: d.github.data.publicRepos ?? 0 },
-              { label: 'Followers', val: d.github.data.followers ?? 0 },
-              { label: 'Following', val: d.github.data.following ?? 0 },
-            ].map(s => (
-              <div key={s.label} className="bg-white/3 rounded-lg p-2 text-center">
-                <div className="text-lg font-bold text-[var(--c1)]">{s.val}</div>
-                <div className="text-xs text-white/30 mt-0.5">{s.label}</div>
-              </div>
-            ))}
-          </div>
-          {d.github.data.location && <div className="text-xs text-white/40 mt-1">📍 {d.github.data.location}</div>}
-          {d.github.data.company && <div className="text-xs text-white/40 mt-1">🏢 {d.github.data.company}</div>}
-          {d.github.data.blog && <div className="text-xs text-blue-400 mt-1">🔗 {d.github.data.blog}</div>}
-          {d.github.url && (
-            <a href={d.github.url} target="_blank" rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 mt-3 text-xs text-[var(--c1)] border border-[var(--c1)]/25 rounded px-2 py-1 hover:bg-[var(--c1)]/10 transition-colors">
-              View Profile ↗
-            </a>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function BreachTab({ d }: { d: ProfileResult }) {
-  return (
-    <div className="space-y-4 animate-fade-up">
-      <div className="card p-4">
-        <div className="flex items-center justify-between mb-4">
-          <div className="text-xs text-[var(--c1)]/50 tracking-widest uppercase">Breach Intelligence</div>
-          <Badge type={d.breaches.length === 0 ? 'ok' : d.breaches.length > 2 ? 'high' : 'medium'}
-            text={`${d.breaches.length} BREACH${d.breaches.length !== 1 ? 'ES' : ''}`} />
-        </div>
-
-        {d.breaches.length === 0 ? (
-          <div className="flex items-center gap-3 p-4 bg-green-500/5 border border-green-500/15 rounded-lg">
-            <span className="text-2xl">✓</span>
-            <div>
-              <div className="text-green-400 font-semibold text-sm">No known breaches detected</div>
-              <div className="text-white/40 text-xs mt-0.5">This email was not found in public breach databases.</div>
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {d.breaches.map((b, i) => (
-              <div key={i} className="p-3 bg-red-500/5 border border-red-500/15 rounded-lg">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-red-400 text-sm">{b.name}</span>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-white/30">{b.year}</span>
-                    <Badge type={b.severity} text={b.severity.toUpperCase()} />
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-1 mt-2">
-                  {b.dataTypes.map(dt => (
-                    <span key={dt} className="text-xs text-white/50 bg-white/5 px-1.5 py-0.5 rounded">{dt}</span>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div className="mt-4 p-3 border border-white/5 rounded-lg">
-          <p className="text-xs text-white/30 leading-relaxed">
-            ⚠ To get real-time breach data, add your <span className="text-[var(--c1)]/60">HIBP_API_KEY</span> environment variable.
-            Get a free key at haveibeenpwned.com.
-          </p>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function TimelineTab({ d }: { d: ProfileResult }) {
-  const tl = d.timeline.length > 0 ? d.timeline : [
-    { year: 2020, event: 'Email address first registered (estimated)' },
-    { year: new Date().getFullYear(), event: 'Profile scanned by ShadowTrace' },
-  ]
-  return (
-    <div className="animate-fade-up">
-      <div className="card p-4">
-        <div className="text-xs text-[var(--c1)]/50 tracking-widest uppercase mb-4">Digital Activity Timeline</div>
-        <div className="relative pl-5">
-          <div className="absolute left-1.5 top-0 bottom-0 w-px bg-gradient-to-b from-[var(--c1)] to-transparent" />
-          {tl.map((item, i) => (
-            <div key={i} className="relative mb-5">
-              <div className="absolute -left-4 top-1 w-2 h-2 rounded-full bg-[var(--c1)] border-2 border-[var(--bg)]" />
-              <div className="text-xs text-[var(--c1)]/50 tracking-widest mb-0.5">{item.year}</div>
-              <div className="text-sm text-white/70">{item.event}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function DomainTab({ d }: { d: ProfileResult }) {
-  return (
-    <div className="space-y-4 animate-fade-up">
-      <div className="card p-4">
-        <div className="text-xs text-[var(--c1)]/50 tracking-widest uppercase mb-4">Domain Intelligence</div>
-        <div className="grid grid-cols-2 gap-3">
-          {[
-            { label: 'Domain', val: d.domain },
-            { label: 'MX Provider', val: d.domainInfo.mxProvider },
-            { label: 'Email Type', val: d.domainInfo.emailType.toUpperCase() },
-            { label: 'Reputation', val: d.domainInfo.reputation.toUpperCase() },
-            { label: 'Username', val: d.username },
-            { label: 'Scanned', val: new Date(d.scannedAt).toLocaleTimeString() },
-          ].map(item => (
-            <div key={item.label} className="bg-white/2 rounded-lg p-3 border border-white/5">
-              <div className="text-xs text-white/30 tracking-widest uppercase mb-1">{item.label}</div>
-              <div className="text-sm text-white/80 truncate">{item.val}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-      <div className="card p-4">
-        <div className="text-xs text-[var(--c1)]/50 tracking-widest uppercase mb-3">Company Intelligence</div>
-        <div className="flex items-center gap-3 mb-3">
-          {d.companyLogo && (
-            <img src={d.companyLogo} alt="" className="w-10 h-10 object-contain opacity-80 rounded" />
-          )}
-          <div>
-            <div className="text-white/90 font-semibold">{d.domainInfo.company}</div>
-            <div className="text-xs text-white/40">{d.domain}</div>
-          </div>
-        </div>
-        <p className="text-xs text-white/30 leading-relaxed">
-          Add <span className="text-[var(--c1)]/60">CLEARBIT_KEY</span> or <span className="text-[var(--c1)]/60">HUNTER_API_KEY</span> for full company data including employees, funding, tech stack, and social links.
-        </p>
-      </div>
-    </div>
-  )
-}
-
-// ─── Main Page ────────────────────────────────────────────────────────────────
-const TABS = ['Overview', 'Social', 'Breaches', 'Timeline', 'Domain']
-const QUICK = ['elon@tesla.com', 'torvalds@linux-foundation.org', 'john.doe@google.com', 'researcher@mit.edu']
-
+// ─── Main component ───────────────────────────────────────────────────────────
 export default function Home() {
   const [email, setEmail] = useState('')
-  const [scanning, setScanning] = useState(false)
-  const [stageIdx, setStageIdx] = useState(-1)
+  const [loading, setLoading] = useState(false)
+  const [currentStep, setCurrentStep] = useState(-1)
   const [result, setResult] = useState<ProfileResult | null>(null)
-  const [error, setError] = useState('')
-  const [activeTab, setActiveTab] = useState('Overview')
-  const inputRef = useRef<HTMLInputElement>(null)
+  const [error, setError] = useState<string | null>(null)
+  const resultsRef = useRef<HTMLDivElement>(null)
 
-  // Animate progress stages
-  const animateStages = async () => {
-    for (let i = 0; i < STAGES.length; i++) {
-      setStageIdx(i)
-      await new Promise(r => setTimeout(r, 500 + Math.random() * 300))
-    }
-  }
+  async function runScan(targetEmail?: string) {
+    const target = (targetEmail || email).trim()
+    if (!target || !target.includes('@')) return
 
-  const scan = async (target?: string) => {
-    const addr = (target || email).trim()
-    if (!addr.includes('@')) { setError('Valid email required'); return }
-    setError(''); setResult(null); setScanning(true); setStageIdx(-1); setActiveTab('Overview')
-    animateStages()
+    setEmail(target)
+    setLoading(true)
+    setResult(null)
+    setError(null)
+    setCurrentStep(0)
+
+    // Animate through steps
+    const stepTimer = setInterval(() => {
+      setCurrentStep(prev => {
+        if (prev >= STEPS.length - 1) { clearInterval(stepTimer); return prev }
+        return prev + 1
+      })
+    }, 700)
+
     try {
       const res = await fetch('/api/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: addr }),
+        body: JSON.stringify({ email: target }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Scan failed')
+      clearInterval(stepTimer)
+      setCurrentStep(STEPS.length)
+
+      if (!res.ok) {
+        const data = await res.json()
+        throw new Error(data.error || `HTTP ${res.status}`)
+      }
+      const data: ProfileResult = await res.json()
       setResult(data)
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Scan failed')
+      setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth' }), 200)
+    } catch (err) {
+      clearInterval(stepTimer)
+      setError(String(err).replace('Error: ', ''))
     } finally {
-      setScanning(false); setStageIdx(-1)
+      setLoading(false)
+      setCurrentStep(-1)
     }
   }
+
+  const ghData = result?.github?.data as Record<string, unknown> | undefined
+  const gp = result?.gravatarProfile
 
   return (
     <>
       <Head>
-        <title>ShadowTrace — AI | Shivam Kumar</title>
-        <meta name="description" content="OSINT email intelligence platform. Discover public digital footprints." />
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
-        <link rel="icon" href="/favicon.svg" />
+        <title>ShadowTrace — Email Intelligence</title>
+        <meta name="description" content="OSINT email intelligence. Discover public digital footprints." />
       </Head>
 
-      <div className="min-h-screen" style={{ background: 'linear-gradient(135deg, #050a10 0%, #090f1e 60%, #0a0d16 100%)' }}>
-        {/* Header */}
-        <header className="border-b border-white/5 px-6 py-3 flex items-center justify-between sticky top-0 z-20 backdrop-blur-sm bg-black/20">
-          <div className="flex items-center gap-3">
-            <div className="w-7 h-7 rounded border border-[var(--c1)]/50 flex items-center justify-center text-xs font-bold text-[var(--c1)] relative overflow-hidden">
-              <div className="absolute inset-0 border-t-2 border-[var(--c1)]/30 rounded animate-spin-slow" />
-              ST
-            </div>
-            <div>
-              <div className="text-[var(--c1)] font-bold tracking-[0.2em] text-sm">SHADOWTRACE</div>
-              <div className="text-white/20 text-[9px] tracking-[0.3em]">EMAIL INTELLIGENCE</div>
-            </div>
-          </div>
-          <div className="flex items-center gap-4 text-[10px] text-white/30 tracking-widest">
-            <span className="flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-[var(--c1)] animate-pulse-green" />
-              ONLINE
-            </span>
-            <span>v1.0</span>
-          </div>
-        </header>
+      <div className="min-h-screen bg-[#030712] text-white font-mono">
+        {/* Scanline overlay */}
+        <div className="pointer-events-none fixed inset-0 bg-[repeating-linear-gradient(0deg,transparent,transparent_2px,rgba(0,255,70,0.015)_2px,rgba(0,255,70,0.015)_4px)] z-0" />
 
-        <div className="max-w-5xl mx-auto px-4 py-6 grid grid-cols-1 md:grid-cols-[260px_1fr] gap-6">
-          {/* Sidebar */}
-          <aside className="space-y-4">
-            {/* Input */}
-            <div className="card p-4">
-              <label className="text-[10px] text-[var(--c1)]/50 tracking-widest uppercase block mb-2">
-                Target Email
-              </label>
-              <input
-                ref={inputRef}
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && scan()}
-                placeholder="target@domain.com"
-                className="w-full bg-white border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-black placeholder-gray-400 focus:border-[var(--c1)]/60 transition-all"
-              />
+        <div className="relative z-10 max-w-3xl mx-auto px-4 py-12">
+
+          {/* Header */}
+          <div className="text-center mb-10">
+            <div className="inline-flex items-center gap-2 text-green-500 text-2xl font-bold tracking-[0.3em] mb-1">
+              <span>⬡</span> SHADOWTRACE
+            </div>
+            <div className="text-[10px] text-green-700 tracking-[0.5em] uppercase mb-1">Email Intelligence Platform</div>
+            <div className="flex items-center justify-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+              <span className="text-[10px] text-green-600 tracking-widest">ONLINE v2.0</span>
+            </div>
+          </div>
+
+          {/* Input */}
+          <div className="border border-green-800/40 rounded-lg p-5 mb-6 bg-black/30">
+            <label className="block text-[10px] text-green-600 tracking-widest mb-2 uppercase">
+              Target Email
+            </label>
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-green-700 text-sm">›</span>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && runScan()}
+                  placeholder="target@domain.com"
+                  className="w-full bg-black/60 border border-green-900/50 rounded pl-7 pr-4 py-2.5 text-sm text-green-300 placeholder-green-900 focus:outline-none focus:border-green-600 focus:ring-1 focus:ring-green-800"
+                  disabled={loading}
+                />
+              </div>
               <button
-                onClick={() => scan()}
-                disabled={scanning}
-                className="w-full mt-2 py-2.5 rounded-lg border border-[var(--c1)] text-[var(--c1)] text-xs tracking-[0.2em] uppercase font-bold transition-all hover:bg-[var(--c1)]/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                onClick={() => runScan()}
+                disabled={loading || !email}
+                className="px-5 py-2.5 bg-green-950 border border-green-700/50 rounded text-green-400 text-xs tracking-widest hover:bg-green-900/40 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
               >
-                {scanning ? '⟳ SCANNING...' : '⬡ INITIATE TRACE'}
+                {loading ? 'SCANNING…' : '⬡ INITIATE TRACE'}
               </button>
-              {error && <p className="text-red-400 text-xs mt-2">{error}</p>}
             </div>
 
             {/* Quick targets */}
-            <div className="card p-4">
-              <div className="text-[10px] text-[var(--c1)]/40 tracking-widest uppercase mb-2">Quick Targets</div>
-              <div className="space-y-1.5">
-                {QUICK.map(q => (
-                  <button key={q} onClick={() => { setEmail(q); scan(q) }}
-                    className="w-full text-left px-2.5 py-1.5 rounded text-xs text-blue-400/80 border border-blue-500/10 bg-blue-500/3 hover:bg-blue-500/10 hover:border-blue-500/30 transition-all truncate">
-                    {q}
-                  </button>
-                ))}
-              </div>
+            <div className="flex flex-wrap gap-2 mt-3">
+              {QUICK_TARGETS.map(t => (
+                <button
+                  key={t}
+                  onClick={() => runScan(t)}
+                  disabled={loading}
+                  className="text-[10px] text-green-700 hover:text-green-500 border border-green-900/40 hover:border-green-700/40 rounded px-2 py-0.5 transition-all"
+                >
+                  {t}
+                </button>
+              ))}
             </div>
+          </div>
 
-            {/* Progress */}
-            <div className="card p-4">
-              <div className="text-[10px] text-[var(--c1)]/40 tracking-widest uppercase mb-3">Scan Progress</div>
-              <div className="space-y-2">
-                {STAGES.map((s, i) => {
-                  const done = scanning ? i < stageIdx : result ? true : false
-                  const active = scanning && i === stageIdx
-                  return (
-                    <div key={s.id} className={`flex items-center gap-2 text-[11px] transition-colors ${done ? 'text-[var(--c1)]' : active ? 'text-yellow-400' : 'text-white/20'}`}>
-                      <span className="w-3 text-center">{done ? '✓' : active ? '►' : '○'}</span>
-                      <span className={active ? 'animate-blink' : ''}>{s.label}</span>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-
-            {/* Risk meter */}
-            {result && (
-              <div className="card p-4 animate-fade-up">
-                <div className="text-[10px] text-[var(--c1)]/40 tracking-widest uppercase mb-2">Risk Score</div>
-                <div className="flex justify-between text-xs mb-1">
-                  <span className={result.riskScore < 30 ? 'text-green-400' : result.riskScore < 60 ? 'text-yellow-400' : 'text-red-400'}>
-                    {result.riskScore < 30 ? 'LOW' : result.riskScore < 60 ? 'MEDIUM' : 'HIGH'}
+          {/* Scan progress */}
+          {loading && (
+            <div className="border border-green-900/30 rounded-lg p-4 mb-6 bg-black/20">
+              <div className="text-[10px] text-green-600 tracking-widest mb-3 uppercase">Scan Progress</div>
+              {STEPS.map((step, i) => (
+                <div key={step.id} className="flex items-center gap-2 py-1">
+                  <span className={`text-xs ${
+                    i < currentStep ? 'text-green-500' :
+                    i === currentStep ? 'text-green-300 animate-pulse' :
+                    'text-gray-700'
+                  }`}>
+                    {i < currentStep ? '✓' : i === currentStep ? '◉' : '○'}
                   </span>
-                  <span className="text-white/40">{result.riskScore}/100</span>
+                  <span className={`text-xs ${
+                    i < currentStep ? 'text-green-600' :
+                    i === currentStep ? 'text-green-300' :
+                    'text-gray-700'
+                  }`}>
+                    {step.label}
+                    {i === currentStep && <span className="ml-1 animate-pulse">…</span>}
+                  </span>
                 </div>
-                <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
-                  <div className="h-full rounded-full transition-all duration-1000"
-                    style={{
-                      width: `${result.riskScore}%`,
-                      background: `linear-gradient(90deg, #00ff9d, #0099ff, ${result.riskScore > 60 ? '#ff4d6d' : '#ffd60a'})`,
-                    }} />
-                </div>
-              </div>
-            )}
-          </aside>
+              ))}
+            </div>
+          )}
 
-          {/* Main panel */}
-          <main className="min-h-[500px]">
-            {!scanning && !result && (
-              <div className="flex flex-col items-center justify-center h-80 gap-4 text-center opacity-40">
-                <div className="text-5xl">⬡</div>
-                <p className="text-sm tracking-widest text-[var(--c2)]/80">ENTER EMAIL TO BEGIN TRACE</p>
-                <p className="text-xs text-white/30">Public data only · GDPR compliant · Powered by Claude AI</p>
-              </div>
-            )}
+          {/* Error */}
+          {error && (
+            <div className="border border-red-900/50 rounded-lg p-4 mb-6 bg-red-950/20">
+              <span className="text-xs text-red-400">⚠ {error}</span>
+            </div>
+          )}
 
-            {scanning && (
-              <div className="flex flex-col items-center justify-center h-80 gap-6">
-                <div className="relative w-16 h-16">
-                  <div className="absolute inset-0 border-2 border-[var(--c1)] border-t-transparent rounded-full animate-spin" />
-                  <div className="absolute inset-2 border-2 border-blue-400 border-b-transparent rounded-full animate-spin" style={{ animationDirection: 'reverse', animationDuration: '0.8s' }} />
-                </div>
-                <div className="text-xs text-[var(--c1)]/70 tracking-widest animate-blink">
-                  {stageIdx >= 0 ? STAGES[stageIdx]?.label.toUpperCase() : 'INITIALIZING...'}
-                </div>
-              </div>
-            )}
+          {/* Results */}
+          {result && (
+            <div ref={resultsRef} className="space-y-4 animate-fadeIn">
 
-            {result && !scanning && (
-              <div>
-                {/* Tabs */}
-                <div className="flex gap-1 mb-4 border-b border-white/5 pb-3">
-                  {TABS.map(t => (
-                    <button key={t} onClick={() => setActiveTab(t)}
-                      className={`px-3 py-1.5 text-xs rounded tracking-widest uppercase transition-all ${activeTab === t ? 'bg-[var(--c1)]/10 text-[var(--c1)] border border-[var(--c1)]/25' : 'text-white/30 hover:text-white/60'}`}>
-                      {t}
-                    </button>
+              {/* Header bar */}
+              <div className="flex items-center justify-between p-3 border border-green-800/30 rounded-lg bg-black/20">
+                <div>
+                  <div className="text-green-400 text-sm font-bold">{result.email}</div>
+                  <div className="text-[10px] text-gray-500 mt-0.5">
+                    Scanned {new Date(result.scannedAt).toLocaleString()}
+                  </div>
+                </div>
+                <div className="flex gap-1 flex-wrap justify-end">
+                  {result.threatFlags.map(f => (
+                    <Badge key={f} text={f}
+                      variant={f.includes('BREACH') || f.includes('CRITICAL') ? 'danger' : f.includes('SUSPICIOUS') ? 'warning' : 'info'}
+                    />
                   ))}
                 </div>
-                {activeTab === 'Overview'  && <OverviewTab  d={result} />}
-                {activeTab === 'Social'    && <SocialTab    d={result} />}
-                {activeTab === 'Breaches'  && <BreachTab    d={result} />}
-                {activeTab === 'Timeline'  && <TimelineTab  d={result} />}
-                {activeTab === 'Domain'    && <DomainTab    d={result} />}
               </div>
-            )}
-          </main>
-        </div>
 
-        {/* Footer */}
-        <footer className="text-center py-4 text-[10px] text-white/15 tracking-widest border-t border-white/5 mt-4">
-          SHADOWTRACE · PUBLIC DATA ONLY · GDPR COMPLIANT · ETHICAL OSINT
-        </footer>
+              {/* Score rings */}
+              <div className="grid grid-cols-4 gap-3 p-4 border border-green-900/20 rounded-lg bg-black/20">
+                <ScoreRing value={result.trustScore}         label="Trust"       color="#22c55e" />
+                <ScoreRing value={result.riskScore}          label="Risk"        color="#ef4444" />
+                <ScoreRing value={result.identityConfidence} label="Confidence"  color="#3b82f6" />
+                <ScoreRing value={result.botProbability}     label="Bot Prob"    color="#f59e0b" />
+              </div>
+
+              {/* AI Summary */}
+              <Section title="AI Intelligence Summary" icon="◈">
+                <p className="text-sm text-gray-300 leading-relaxed font-sans">{result.aiSummary}</p>
+              </Section>
+
+              {/* Domain */}
+              <Section title="Domain Intelligence" icon="◎">
+                <div>
+                  <DataRow label="Domain"      value={result.domain} mono />
+                  <DataRow label="Email Type"  value={result.domainInfo.emailType} />
+                  <DataRow label="MX Provider" value={result.domainInfo.mxProvider} />
+                  <DataRow label="Reputation"  value={
+                    <span className={
+                      result.domainInfo.reputation === 'suspicious' ? 'text-red-400' :
+                      result.domainInfo.reputation === 'trusted' ? 'text-green-400' :
+                      result.domainInfo.reputation === 'privacy-focused' ? 'text-blue-400' :
+                      'text-gray-300'
+                    }>{result.domainInfo.reputation}</span>
+                  } />
+                  {result.companyLogo && (
+                    <div className="mt-3 flex items-center gap-2">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={result.companyLogo} alt="Company logo" className="h-6 w-auto opacity-80" />
+                      <span className="text-xs text-gray-500">{result.domainInfo.company}</span>
+                    </div>
+                  )}
+                </div>
+              </Section>
+
+              {/* Gravatar */}
+              <Section title="Gravatar Profile" icon="◈">
+                {result.gravatarUrl || result.gravatarProfile ? (
+                  <div className="flex gap-4">
+                    {result.gravatarUrl && (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={result.gravatarUrl}
+                        alt="Gravatar"
+                        className="w-16 h-16 rounded-full border border-green-900/40 shrink-0"
+                      />
+                    )}
+                    <div className="flex-1">
+                      <DataRow label="Display Name"  value={gp?.displayName} />
+                      <DataRow label="Username"      value={gp?.preferredUsername} mono />
+                      <DataRow label="Location"      value={gp?.location} />
+                      <DataRow label="Job Title"     value={gp?.jobTitle} />
+                      <DataRow label="Company"       value={gp?.company} />
+                      <DataRow label="Pronouns"      value={gp?.pronouns} />
+                      <DataRow label="Bio"           value={gp?.bio} />
+                      {gp?.verified_accounts && gp.verified_accounts.length > 0 && (
+                        <div className="mt-2">
+                          <div className="text-[10px] text-gray-500 mb-1">Verified Accounts</div>
+                          <div className="flex flex-wrap gap-1">
+                            {gp.verified_accounts.map((a, i) => (
+                              <a key={i} href={a.url} target="_blank" rel="noopener noreferrer"
+                                className="text-[10px] px-2 py-0.5 bg-blue-950/40 border border-blue-900/40 text-blue-400 rounded hover:bg-blue-900/40 transition-colors">
+                                {a.service_label}
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {gp?.urls && gp.urls.length > 0 && (
+                        <div className="mt-2">
+                          <div className="text-[10px] text-gray-500 mb-1">Links</div>
+                          {gp.urls.map((u, i) => (
+                            <a key={i} href={u.value} target="_blank" rel="noopener noreferrer"
+                              className="block text-xs text-blue-400 hover:text-blue-300 truncate">
+                              {u.title || u.value}
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-gray-600">No Gravatar profile found for this email.</p>
+                )}
+              </Section>
+
+              {/* GitHub */}
+              <Section title={`GitHub Profile ${result.github.found ? `— @${result.github.handle}` : ''}`} icon="◉">
+                {result.github.found ? (
+                  <div>
+                    <div className="flex items-start gap-4 mb-3">
+                      {ghData?.avatarUrl && (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={ghData.avatarUrl as string}
+                          alt="GitHub avatar"
+                          className="w-14 h-14 rounded-full border border-green-900/40 shrink-0"
+                        />
+                      )}
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-1">
+                          <a href={result.github.url} target="_blank" rel="noopener noreferrer"
+                            className="text-green-400 text-sm hover:text-green-300 font-bold">
+                            @{result.github.handle}
+                          </a>
+                          <Badge text={`${result.github.confidence}% confidence`} variant="info" />
+                          {ghData?.hireable && <Badge text="HIREABLE" variant="success" />}
+                        </div>
+                        {ghData?.name && <div className="text-xs text-gray-300">{ghData.name as string}</div>}
+                        {ghData?.bio  && <div className="text-xs text-gray-400 mt-0.5">{ghData.bio as string}</div>}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-x-4">
+                      <DataRow label="Company"    value={ghData?.company as string} />
+                      <DataRow label="Location"   value={ghData?.location as string} />
+                      <DataRow label="Email"      value={ghData?.email as string} mono />
+                      <DataRow label="Website"    value={ghData?.blog
+                        ? <a href={ghData.blog as string} target="_blank" rel="noopener noreferrer"
+                            className="text-blue-400 hover:underline">{ghData.blog as string}</a>
+                        : null} />
+                      <DataRow label="Twitter"    value={ghData?.twitterUsername ? `@${ghData.twitterUsername}` : null} />
+                      <DataRow label="Joined"     value={ghData?.createdAt ? new Date(ghData.createdAt as string).toLocaleDateString() : null} />
+                      <DataRow label="Public Repos"  value={String(ghData?.publicRepos || 0)} mono />
+                      <DataRow label="Public Gists"  value={String(ghData?.publicGists || 0)} mono />
+                      <DataRow label="Followers"  value={String(ghData?.followers || 0)} mono />
+                      <DataRow label="Following"  value={String(ghData?.following || 0)} mono />
+                    </div>
+
+                    {/* Recent repos */}
+                    {(ghData?.recentRepos as Array<{ name: string; language: string | null; stars: number; description: string | null }>)?.length > 0 && (
+                      <div className="mt-3">
+                        <div className="text-[10px] text-gray-500 mb-2 uppercase tracking-wider">Recent Repositories</div>
+                        <div className="space-y-1.5">
+                          {(ghData.recentRepos as Array<{ name: string; language: string | null; stars: number; description: string | null }>).map((repo) => (
+                            <div key={repo.name} className="flex items-center justify-between text-xs p-2 bg-black/30 rounded border border-gray-800/40">
+                              <div>
+                                <a href={`${result.github.url}/${repo.name}`} target="_blank" rel="noopener noreferrer"
+                                  className="text-green-400 hover:text-green-300">{repo.name}</a>
+                                {repo.description && <span className="text-gray-500 ml-2 text-[10px]">{repo.description}</span>}
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0 ml-2">
+                                {repo.language && <span className="text-[10px] text-blue-400">{repo.language}</span>}
+                                {repo.stars > 0 && <span className="text-[10px] text-yellow-600">★ {repo.stars}</span>}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-gray-600">No GitHub profile matched for this email or username.</p>
+                )}
+              </Section>
+
+              {/* npm */}
+              {result.npmPackages?.length > 0 && (
+                <Section title="npm Packages" icon="◫">
+                  <div className="space-y-2">
+                    {result.npmPackages.map(pkg => (
+                      <div key={pkg.name} className="flex items-center justify-between p-2 bg-black/30 rounded border border-gray-800/40">
+                        <div>
+                          <a href={`https://www.npmjs.com/package/${pkg.name}`} target="_blank" rel="noopener noreferrer"
+                            className="text-green-400 text-xs hover:text-green-300">{pkg.name}</a>
+                          <span className="text-[10px] text-gray-600 ml-2">v{pkg.version}</span>
+                          {pkg.description && <div className="text-[10px] text-gray-500 mt-0.5">{pkg.description}</div>}
+                        </div>
+                        <div className="text-[10px] text-yellow-600 shrink-0 ml-2">
+                          {pkg.downloads.toLocaleString()} dl/mo
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </Section>
+              )}
+
+              {/* Breaches */}
+              <Section title={`Breach History — ${result.breaches.length} found`} icon="⚠">
+                {result.hibpError && (
+                  <div className="text-[10px] text-yellow-700 bg-yellow-950/20 border border-yellow-900/30 rounded p-2 mb-3">
+                    ℹ {result.hibpError}
+                  </div>
+                )}
+                {result.breaches.length > 0 ? (
+                  <div className="space-y-2">
+                    {result.breaches.map((b, i) => (
+                      <div key={i} className="p-3 bg-black/30 rounded border border-gray-800/40">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-white font-medium">{b.name}</span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] text-gray-500">{b.year}</span>
+                            <Badge
+                              text={b.severity}
+                              variant={b.severity === 'high' ? 'danger' : b.severity === 'medium' ? 'warning' : 'info'}
+                            />
+                          </div>
+                        </div>
+                        {b.pwnCount && (
+                          <div className="text-[10px] text-gray-500 mb-1">{b.pwnCount.toLocaleString()} accounts affected</div>
+                        )}
+                        <div className="flex flex-wrap gap-1">
+                          {b.dataTypes.map(dt => (
+                            <span key={dt} className="text-[10px] px-1.5 py-0.5 bg-red-950/30 text-red-400 rounded border border-red-900/30">
+                              {dt}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : !result.hibpError ? (
+                  <p className="text-xs text-green-700">✓ No breaches found for this email address.</p>
+                ) : null}
+              </Section>
+
+              {/* Timeline */}
+              {result.timeline.length > 0 && (
+                <Section title="Digital Activity Timeline" icon="◷">
+                  <div className="relative ml-2">
+                    {result.timeline.map((item, i) => (
+                      <div key={i} className="flex gap-3 mb-3 last:mb-0">
+                        <div className="flex flex-col items-center">
+                          <div className={`w-1.5 h-1.5 rounded-full mt-1 shrink-0 ${
+                            item.source === 'hibp' ? 'bg-red-500' :
+                            item.source === 'github' ? 'bg-green-500' :
+                            item.source === 'npm' ? 'bg-yellow-500' :
+                            'bg-blue-500'
+                          }`} />
+                          {i < result.timeline.length - 1 && (
+                            <div className="w-px flex-1 bg-gray-800 mt-1" />
+                          )}
+                        </div>
+                        <div className="pb-2">
+                          <div className="text-[10px] text-gray-500 font-mono">
+                            {item.year === 0 ? 'Unknown year' : item.year}
+                          </div>
+                          <div className="text-xs text-gray-300 mt-0.5">{item.event}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </Section>
+              )}
+
+              {/* Footer */}
+              <div className="text-center text-[10px] text-gray-700 pt-2 tracking-widest">
+                SHADOWTRACE · PUBLIC DATA ONLY · GDPR COMPLIANT · ETHICAL OSINT
+              </div>
+            </div>
+          )}
+
+          {/* Idle state */}
+          {!result && !loading && !error && (
+            <div className="text-center py-16">
+              <div className="text-4xl text-green-900 mb-3">⬡</div>
+              <div className="text-xs text-gray-700 tracking-widest">ENTER EMAIL TO BEGIN TRACE</div>
+              <div className="text-[10px] text-gray-800 mt-2">Public data only · GDPR compliant · Powered by Claude AI</div>
+            </div>
+          )}
+        </div>
       </div>
+
+      <style jsx global>{`
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: #030712; font-family: 'JetBrains Mono', monospace; }
+        ::selection { background: #15803d40; color: #86efac; }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: #030712; }
+        ::-webkit-scrollbar-thumb { background: #14532d; border-radius: 2px; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-fadeIn { animation: fadeIn 0.4s ease forwards; }
+      `}</style>
     </>
   )
 }
