@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import Head from 'next/head'
 
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface SocialProfile {
   found: boolean; confidence: number; url?: string; handle?: string
@@ -411,10 +412,11 @@ export default function Home() {
   return (
     <>
       <Head>
-        <title>ShadowTrace — Email Intelligence</title>
+        <title>ShadowTrace — AI | Shivam Kumar</title>
         <meta name="description" content="OSINT email intelligence platform. Discover public digital footprints." />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
+        <link rel="icon" href="/favicon.svg" />
       </Head>
 
       <div className="min-h-screen" style={{ background: 'linear-gradient(135deg, #050a10 0%, #090f1e 60%, #0a0d16 100%)' }}>
@@ -453,7 +455,7 @@ export default function Home() {
                 onChange={e => setEmail(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && scan()}
                 placeholder="target@domain.com"
-                className="w-full bg-[var(--c1)]/5 border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--c1)] placeholder-[var(--c1)]/20 focus:border-[var(--c1)]/60 focus:bg-[var(--c1)]/8 transition-all"
+                className="w-full bg-white border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-black placeholder-gray-400 focus:border-[var(--c1)]/60 transition-all"
               />
               <button
                 onClick={() => scan()}
